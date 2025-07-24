@@ -10,7 +10,7 @@ from chromadb import PersistentClient
 from chromadb.config import Settings
 
 # ========== CONFIG ==========
-OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 EMBED_MODEL = "nomic-embed-text:latest"
 LLM_MODEL = "llama3.2:3b"
 TOP_K = 3
