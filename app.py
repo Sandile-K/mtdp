@@ -4,7 +4,7 @@ import requests
 import pdfplumber
 from tqdm import tqdm
 from uuid import uuid4
-from chromadb import Client
+import chromadb
 
 # Load environment variables
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
