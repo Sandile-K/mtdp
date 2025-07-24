@@ -1,3 +1,6 @@
 streamlit
-chromadb
+pdfplumber
 requests
+tqdm
+chromadb
+
