@@ -5,21 +5,20 @@ import pdfplumber
 from tqdm import tqdm
 from uuid import uuid4
 from chromadb import Client
-from chromadb.config import Settings
 
 # Load environment variables
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 EMBED_MODEL = "mistralai/mistral-7b-instruct:free"
 CHAT_MODEL = "meta-llama/llama-3.2-3b-instruct:free"
 
-# Setup ChromaDB
-chroma_client = Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory="./chroma"))
+# Initialize ChromaDB using latest syntax
+chroma_client = chromadb.PersistentClient(path="./chroma")
 collection = chroma_client.get_or_create_collection("rag_collection")
 
 # Headers for OpenRouter
 headers = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "HTTP-Referer": "https://mtdp-rag-app.onrender.com",
+    "HTTP-Referer": "https://mtdp.onrender.com",
     "X-Title": "MTDP-RAG-App"
 }
 
