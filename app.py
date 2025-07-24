@@ -1,169 +1,104 @@
 import os
-import re
-import tempfile
 import streamlit as st
-import pdfplumber
 import requests
+import pdfplumber
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from chromadb import PersistentClient
+from uuid import uuid4
+from chromadb import Client
 from chromadb.config import Settings
 
-# ========== CONFIG ==========
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-EMBED_MODEL = "nomic-embed-text:latest"
-LLM_MODEL = "llama3.2:3b"
-TOP_K = 3
-CHROMA_DIR = "chroma_db"
+# Load environment variables
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+EMBED_MODEL = "mistralai/mistral-7b-instruct:free"
+CHAT_MODEL = "meta-llama/llama-3.2-3b-instruct:free"
 
-def check_ollama_available():
-    try:
-        res = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
-        return res.status_code == 200
-    except Exception as e:
-        st.error("❌ Cannot connect to Ollama server. Make sure the SSH tunnel is active.")
-        st.stop()
+# Setup ChromaDB
+chroma_client = Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory="./chroma"))
+collection = chroma_client.get_or_create_collection("rag_collection")
 
-check_ollama_available()
+# Headers for OpenRouter
+headers = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "HTTP-Referer": "https://mtdp-rag-app.onrender.com",
+    "X-Title": "MTDP-RAG-App"
+}
 
-
-# ========== FUNCTIONS ==========
-
-def preprocess(text):
-    text = re.sub(r'\n+', ' ', text)
-    text = re.sub(r'•', '-', text)
-    text = re.sub(r'\s{2,}', ' ', text)
-    text = re.sub(r'Page \d+', '', text)
-    return text.strip() if len(text.strip()) > 40 else None
-
-def chunk_text(text_list, max_tokens=400):
-    chunks, current = [], ""
-    for text in text_list:
-        if len(current.split()) + len(text.split()) <= max_tokens:
-            current += " " + text
+# Text splitting helper
+def chunk_text(text, max_tokens=300):
+    chunks = []
+    current = ""
+    for para in text.split("\n"):
+        if len(current) + len(para) < max_tokens:
+            current += " " + para
         else:
             chunks.append(current.strip())
-            current = text
+            current = para
     if current:
         chunks.append(current.strip())
     return chunks
 
-def embed_ollama_parallel(texts, model="nomic-embed-text:latest", max_workers=10):
-    def embed_one(text):
-        try:
-            res = requests.post(
-                f"{OLLAMA_HOST}/api/embeddings",
-                json={"model": model, "prompt": text},
-                timeout=30
-            )
-            res.raise_for_status()
-            return res.json()["embedding"]
-        except Exception as e:
-            st.error(f"Embedding failed: {e}")
-            return [0.0] * 768  # fallback vector
-    embeddings = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(embed_one, t) for t in texts]
-        for future in tqdm(as_completed(futures), total=len(texts), desc="🔗 Embedding"):
-            embeddings.append(future.result())
-    return embeddings
+# Embedding function via OpenRouter
+def get_embedding(text):
+    res = requests.post(
+        "https://openrouter.ai/api/v1/embeddings",
+        headers=headers,
+        json={"model": EMBED_MODEL, "input": text}
+    )
+    res.raise_for_status()
+    return res.json()["data"][0]["embedding"]
 
-def stream_llama(prompt):
-    try:
-        res = requests.post(
-            f"{OLLAMA_HOST}/api/generate",
-            json={"model": LLM_MODEL, "prompt": prompt, "stream": True, "temperature": 0.3, "top_p": 0.95},
-            stream=True,
-            timeout=60
-        )
-        res.raise_for_status()
-        for line in res.iter_lines():
-            if line:
-                yield line.decode("utf-8").replace("data: ", "")
-    except Exception as e:
-        st.error(f"Streaming failed: {e}")
-        yield ""
+# LLM chat completion via OpenRouter
+def ask_model(query, context):
+    prompt = f"""
+You are an expert assistant. Based on the following context, answer the user query clearly and accurately.
 
-# ========== CHROMA INITIALIZATION ==========
-os.makedirs(CHROMA_DIR, exist_ok=True)
-client = PersistentClient(path=CHROMA_DIR, settings=Settings())
-collection = client.get_or_create_collection("mtdp_chunks")
+Context:
+{context}
 
-# ========== UI ==========
-st.set_page_config("📚 MTDP RAG Assistant", layout="wide")
-st.title("🇿🇦 Medium Term Development Plan 2024–2029")
-st.markdown("Upload the MTDP PDF, embed it, and ask questions using LLaMA 3.")
+Query:
+{query}
+"""
+    res = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers=headers,
+        json={
+            "model": CHAT_MODEL,
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant for South Africa's Medium Term Development Plan 2024–2029."},
+                {"role": "user", "content": prompt}
+            ]
+        }
+    )
+    res.raise_for_status()
+    return res.json()["choices"][0]["message"]["content"]
 
-# ========== PDF UPLOAD ==========
-uploaded = st.file_uploader("📄 Upload PDF", type=["pdf"])
-if uploaded:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded.read())
-        pdf_path = tmp_file.name
+# Streamlit UI
+st.set_page_config(page_title="MTDP RAG App")
+st.title("📘 MTDP 2024–2029 RAG App (OpenRouter Edition)")
 
-    st.subheader("🔍 Preprocessing PDF...")
-    with pdfplumber.open(pdf_path) as pdf:
-        pages = [p.extract_text() for p in pdf.pages]
-    texts = [preprocess(t) for t in pages if t]
-    clean_texts = list(filter(None, texts))
-    chunks = chunk_text(clean_texts)
+uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
 
-    st.subheader("💾 Embedding and storing in ChromaDB...")
-    embeddings = embed_ollama_parallel(chunks)
+if uploaded_file:
+    with pdfplumber.open(uploaded_file) as pdf:
+        all_text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
+    st.success("PDF loaded.")
 
-    existing_ids = set(collection.get()['ids'])
+    with st.spinner("Embedding and storing chunks..."):
+        chunks = chunk_text(all_text)
+        for chunk in tqdm(chunks):
+            embedding = get_embedding(chunk)
+            uid = str(uuid4())
+            collection.add(documents=[chunk], ids=[uid], embeddings=[embedding])
+        chroma_client.persist()
+        st.success(f"{len(chunks)} chunks embedded and stored!")
 
-    for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-        chunk_id = f"chunk_{i}"
-        if chunk_id not in existing_ids:
-            collection.add(
-                ids=[chunk_id],
-                documents=[chunk],
-                embeddings=[emb],
-                metadatas=[{"source": "MTDP 2024-2029", "chunk_index": i}]
-            )
-    st.success(f"✅ Embedded and stored {len(chunks)} chunks.")
+query = st.text_input("Ask a question about the MTDP document:")
 
-# ========== RAG ==========
-st.subheader("🤖 Ask a question about the MTDP:")
-query = st.text_input("Enter your question here")
 if query:
-    with st.spinner("Thinking..."):
-        qres = requests.post(
-            f"{OLLAMA_HOST}/api/embeddings",
-            json={"model": EMBED_MODEL, "prompt": query}
-        )
-        qres.raise_for_status()
-        qemb = qres.json()["embedding"]
-
-        results = collection.query(
-            query_embeddings=[qemb],
-            n_results=TOP_K,
-            include=["documents", "metadatas"]
-        )
-        docs = results["documents"][0]
-        context = "\n\n".join(docs)
-
-        prompt = (
-            f"Answer the question below using only the context.\n\n"
-            f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
-        )
-
-        st.markdown("### 📘 Answer")
-        placeholder = st.empty()
-        full_response = ""
-        import json
-
-        for chunk in stream_llama(prompt):
-            try:
-                data = json.loads(chunk)
-                if "response" in data:
-                    full_response += data["response"]
-                    placeholder.markdown(full_response + "▌")
-            except json.JSONDecodeError:
-                continue
-
-
-    with st.expander("🔍 Sources"):
-        for i, chunk in enumerate(docs):
-            st.markdown(f"**Chunk {i+1}:** {chunk[:400]}...")
+    with st.spinner("Searching..."):
+        query_embedding = get_embedding(query)
+        results = collection.query(query_embeddings=[query_embedding], n_results=4)
+        context = "\n\n".join(results["documents"][0])
+        response = ask_model(query, context)
+        st.markdown("### 📎 Answer")
+        st.markdown(response)
